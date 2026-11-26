@@ -6,8 +6,8 @@ if errorlevel 1 (
   echo Could not enter the VIctory folder. 1>&2
   exit /b 1
 )
-if not "%~1"=="" if /i not "%~1"=="pareto-residency" if /i not "%~1"=="measure" if /i not "%~1"=="shaders" (
-  echo Usage: Play-VIctory.cmd [pareto-residency^|measure^|shaders] 1>&2
+if not "%~1"=="" if /i not "%~1"=="pareto-residency" if /i not "%~1"=="measure" if /i not "%~1"=="raytracing" if /i not "%~1"=="shaders" (
+  echo Usage: Play-VIctory.cmd [pareto-residency^|measure^|raytracing^|shaders] 1>&2
   popd
   exit /b 2
 )
@@ -25,7 +25,10 @@ if not exist "%runner%" (
   popd
   exit /b 2
 )
-if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.5"
+rem raytracing: the title's own ray-traced indirect light (structure builder on).
+rem The low-resolution ambient stand-in (VICTORY_AMBIENT*) is then left off.
+if /i "%~1"=="raytracing" if not defined VICTORY_BVH_BUILDER set "VICTORY_BVH_BUILDER=1"
+if /i not "%~1"=="raytracing" if not defined VICTORY_AMBIENT_AIR set "VICTORY_AMBIENT_AIR=1.5"
 if not defined VICTORY_CACHE_DIR set "VICTORY_CACHE_DIR=%LOCALAPPDATA%\VIctory\cache-pareto"
 if not defined VICTORY_DATA_DIR set "VICTORY_DATA_DIR=%LOCALAPPDATA%\VIctory\data-pareto"
 if not defined VICTORY_PIPELINE_BOOK set "VICTORY_PIPELINE_BOOK=1"
@@ -41,7 +44,7 @@ if not defined VICTORY_INDIRECT_BATCH set "VICTORY_INDIRECT_BATCH=2"
 if not defined VICTORY_MAP_THREADS set "VICTORY_MAP_THREADS=1"
 if not defined VICTORY_CARD_AWAKE set "VICTORY_CARD_AWAKE=1"
 if not defined VICTORY_SHOW_AFTER set "VICTORY_SHOW_AFTER=1"
-if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.8"
+if /i not "%~1"=="raytracing" if not defined VICTORY_AMBIENT set "VICTORY_AMBIENT=0.8"
 if not defined VICTORY_THIN set "VICTORY_THIN=1"
 if not defined VICTORY_JOIN_PARTS set "VICTORY_JOIN_PARTS=8"
 if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"

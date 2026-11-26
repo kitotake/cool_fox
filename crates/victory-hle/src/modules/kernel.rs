@@ -111,6 +111,9 @@ pub extern "system" fn LoadLibraryExA(
     file: *mut c_void,
     flags: u32,
 ) -> *mut c_void {
+    if !name.is_null() && refused_by_switch(&narrow(name)) {
+        return std::ptr::null_mut();
+    }
     if !name.is_null()
         && let Some(handle) = find_module(&narrow(name), runs_code(flags))
     {
@@ -125,12 +128,43 @@ pub extern "system" fn LoadLibraryExW(
     file: *mut c_void,
     flags: u32,
 ) -> *mut c_void {
+    if !name.is_null() && refused_by_switch(&wide(name)) {
+        return std::ptr::null_mut();
+    }
     if !name.is_null()
         && let Some(handle) = find_module(&wide(name), runs_code(flags))
     {
         return handle;
     }
     host::load_library_ex_w(name, file, flags)
+}
+
+/// Diagnostics: `VICTORY_REFUSE_TITLE_DLL=<file>[,<file>...]` makes the
+/// title's dynamic loads of those DLLs fail as for a missing module
+/// (`ERROR_MOD_NOT_FOUND`), to see the title's path without them (the
+/// FidelityFX upscaler, `amd_fidelityfx_upscaler_xbox.dll`). Unset: nothing.
+fn refused_by_switch(name: &str) -> bool {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| {
+        std::env::var("VICTORY_REFUSE_TITLE_DLL")
+            .unwrap_or_default()
+            .split(',')
+            .map(|d| d.trim().to_ascii_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect()
+    });
+    if list.is_empty() {
+        return false;
+    }
+    let file = name.rsplit(['\\', '/']).next().unwrap_or(name).to_ascii_lowercase();
+    let hit = list
+        .iter()
+        .any(|d| *d == file || format!("{d}.dll") == file || *d == format!("{file}.dll"));
+    if hit {
+        tracing::warn!(dll = file, "a title DLL refused by VICTORY_REFUSE_TITLE_DLL");
+        host::set_last_error(126);
+    }
+    hit
 }
 
 /// False for loads as data or resources (`DONT_RESOLVE_DLL_REFERENCES`,

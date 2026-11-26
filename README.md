@@ -21,6 +21,11 @@ For a one-off performance log, run `Play-VIctory.cmd measure`. It enables
 info-level frame timings and appends the output to `debugs\victory-measure.log`
 without changing the game's graphics settings.
 
+To precompile the shaders found in your configured game dump and save the
+report, run `Play-VIctory.cmd shaders`. It creates `debugs` when needed and
+appends the output to `debugs\shaders-precompile.log`. This can take several
+minutes; the compiled shaders are stored in the configured cache.
+
 To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
@@ -250,6 +255,9 @@ victory translate 'D:\Games\MyDump' --validate --list
 
 # Precompile every discovered shader into the shader cache
 victory shaders 'D:\Games\MyDump' --jobs 8
+
+# Precompile the configured game dump and save a report under debugs\
+.\Play-VIctory.cmd shaders
 
 # Translate only the shader hashes found in a run log
 victory translate 'D:\Games\MyDump' --warm 'D:\Logs\victory-measure.log' --jobs 8

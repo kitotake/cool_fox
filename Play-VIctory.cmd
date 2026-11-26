@@ -6,8 +6,8 @@ if errorlevel 1 (
   echo Could not enter the VIctory folder. 1>&2
   exit /b 1
 )
-if not "%~1"=="" if /i not "%~1"=="pareto-residency" if /i not "%~1"=="measure" (
-  echo Usage: Play-VIctory.cmd [pareto-residency^|measure] 1>&2
+if not "%~1"=="" if /i not "%~1"=="pareto-residency" if /i not "%~1"=="measure" if /i not "%~1"=="shaders" (
+  echo Usage: Play-VIctory.cmd [pareto-residency^|measure^|shaders] 1>&2
   popd
   exit /b 2
 )
@@ -48,6 +48,7 @@ if not defined VICTORY_UPLOAD_AHEAD set "VICTORY_UPLOAD_AHEAD=1"
 if not defined VICTORY_LEVELS_ON_DEMAND set "VICTORY_LEVELS_ON_DEMAND=1"
 if not defined VICTORY_CARD_BUFFERS_MIN_KB set "VICTORY_CARD_BUFFERS_MIN_KB=64"
 if not defined VICTORY_LOG if not defined RUST_LOG set "VICTORY_LOG=warn"
+if /i "%~1"=="shaders" goto shaders
 if exist "%VICTORY_CACHE_DIR%\pipelines\known-pipelines.bin" (
   echo Warming previously used host pipelines...
   "%runner%" warm --used --jobs 2
@@ -59,6 +60,24 @@ if exist "%VICTORY_CACHE_DIR%\pipelines\known-pipelines.bin" (
 if /i "%~1"=="measure" goto measure
 "%runner%" run "%VICTORY_GAME_DIR%\game_scarlett_master.exe" --console series-s --execute
 set "run_error=%errorlevel%"
+popd
+exit /b %run_error%
+
+:shaders
+if not exist "%~dp0debugs" mkdir "%~dp0debugs"
+if not exist "%~dp0debugs" (
+  echo Could not create the debugs folder. 1>&2
+  popd
+  exit /b 1
+)
+set "VICTORY_LOG=info"
+echo.>>"%~dp0debugs\shaders-precompile.log"
+echo ===== %date% %time% =====>>"%~dp0debugs\shaders-precompile.log"
+echo Precompiling shaders from "%VICTORY_GAME_DIR%"...
+"%runner%" shaders "%VICTORY_GAME_DIR%" >>"%~dp0debugs\shaders-precompile.log" 2>&1
+set "run_error=%errorlevel%"
+echo Shader precompile exit code: %run_error%>>"%~dp0debugs\shaders-precompile.log"
+echo Log saved to "%~dp0debugs\shaders-precompile.log"
 popd
 exit /b %run_error%
 

@@ -90,6 +90,13 @@ scripts\play.ps1 -Exe <path of your copy's executable>
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
 something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
 
+For a 6 GB card, `Play-VIctory-6GB.cmd` reports a 1920x1080 display mode to the
+title and applies a smaller texture budget before calling the regular launcher.
+This does not necessarily lower the title's internal render resolution. Whether
+the title follows the reported mode has not been verified; compare the same
+scene with `measure` before drawing conclusions. Set `VICTORY_DISPLAY_MODE`
+before launching to try another reported mode, such as `1280x720`.
+
 Before the first run, ahead of time (both can be stopped and go on later):
 
 ```powershell

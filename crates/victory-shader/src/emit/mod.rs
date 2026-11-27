@@ -86,6 +86,8 @@ mod container;
 mod cube_lod_tests;
 #[cfg(all(test, windows))]
 mod diff_tests;
+#[cfg(test)]
+mod diag_tests;
 #[cfg(all(test, windows))]
 mod intersect_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
@@ -379,6 +381,75 @@ pub struct UserData {
     pub dword: u32,
 }
 
+thread_local! {
+    /// See [`with_diag_label`].
+    static DIAG_LABEL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Runs `f` with `label` (a shader's name and hash, as a `victory translate --list` line
+/// gives them) on every `WAVE64-*` diagnostic line `f` prints for this thread, so that the
+/// lines of one shader can be told from another's in a log of several.
+///
+/// With no label (the default) the lines are as they always were.
+pub fn with_diag_label<R>(label: &str, f: impl FnOnce() -> R) -> R {
+    struct Restore(String);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DIAG_LABEL.with(|l| *l.borrow_mut() = std::mem::take(&mut self.0));
+        }
+    }
+    let before = DIAG_LABEL.with(|l| std::mem::replace(&mut *l.borrow_mut(), label.to_owned()));
+    let _restore = Restore(before);
+    f()
+}
+
+/// A `WAVE64-*` diagnostic line: `tag`, the [`with_diag_label`] label in brackets when there
+/// is one, then `msg`.
+pub(super) fn diag_line(tag: &str, msg: std::fmt::Arguments<'_>) -> String {
+    DIAG_LABEL.with(|l| {
+        let l = l.borrow();
+        if l.is_empty() { format!("{tag} {msg}") } else { format!("{tag} [{l}] {msg}") }
+    })
+}
+
+pub(super) fn diag(tag: &str, msg: std::fmt::Arguments<'_>) {
+    eprintln!("{}", diag_line(tag, msg));
+}
+
+/// `digest` as the lowercase hex a `WAVE64-ID` line and `VICTORY_WAVE_WIDE_ALLOW` name it by.
+fn digest_hex(digest: &[u8; 16]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether `allow` (`VICTORY_WAVE_WIDE_ALLOW`: container digests, or their leading hex
+/// digits at least 8 long, separated by commas) names `digest`.
+///
+/// Wave-wide branches are off by default (group barriers inside branches and loops lost the
+/// card in earlier runs): this turns them on for the programs named and no others, to try
+/// one program at a time on hardware. `VICTORY_WAVE_WIDE=0` or `=1` still decides for all.
+fn wide_allowed(allow: &str, digest: &[u8; 16]) -> bool {
+    let hex = digest_hex(digest);
+    allow
+        .split(',')
+        .map(|d| d.trim().to_ascii_lowercase())
+        .any(|d| d.len() >= 8 && hex.starts_with(&d))
+}
+
+/// The error of a console wave64 compute program that stays a program of 64 lanes on a host
+/// of 32. A thread group of more than 64 threads is several console waves: the wave-wide
+/// branches ([`widen`]) are not tried for it, and it is listed apart from the single-wave ones.
+fn no_wave32_lowering(native: &NativeProgram) -> ShaderError {
+    let several = matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() > 64);
+    ShaderError::Unsupported {
+        offset: 0,
+        what: if several { NO_WAVE32_SEVERAL_WAVES } else { NO_WAVE32 },
+    }
+}
+
+const NO_WAVE32: &str = "no wave32 lowering for this wave64 program";
+const NO_WAVE32_SEVERAL_WAVES: &str =
+    "no wave32 lowering for this wave64 program (thread group over 64: several console waves)";
+
 /// Translates the vertex, pixel, compute or mesh program of a console
 /// shader container.
 ///
@@ -452,11 +523,18 @@ pub fn emit(
     let exact_only = matches!(&original, Err(ShaderError::Unsupported { what, .. }) if *what == lower::MASK_ELSEWHERE);
     if stuck && native.stage == HwStage::Cs && native.wave64 && lower::host_max_wave() == 32 {
         let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
+        if why {
+            let group = match native.io {
+                crate::native::StageIo::Cs(cs) => cs.threads.iter().product::<u32>(),
+                _ => 0,
+            };
+            diag("WAVE64-ID", format_args!("digest={} group={group}", digest_hex(&c.digest)));
+        }
         let report = |what: &str, r: &Result<(HostShader, Option<u32>), ShaderError>| {
             if why {
                 match r {
-                    Ok((_, wave)) => eprintln!("WAVE64-RETRY {what}: wave {wave:?}"),
-                    Err(e) => eprintln!("WAVE64-RETRY {what}: {e}"),
+                    Ok((_, wave)) => diag("WAVE64-RETRY", format_args!("{what}: wave {wave:?}")),
+                    Err(e) => diag("WAVE64-RETRY", format_args!("{what}: {e}")),
                 }
             }
         };
@@ -474,7 +552,7 @@ pub fn emit(
             Ok(()) => true,
             Err((offset, what)) => {
                 if why {
-                    eprintln!("WAVE64-RETRY local waves: not the allocation idiom at {offset:#x}: {what}");
+                    diag("WAVE64-RETRY", format_args!("local waves: not the allocation idiom at {offset:#x}: {what}"));
                 }
                 false
             }
@@ -484,7 +562,7 @@ pub fn emit(
         let form = |label: &str, p: Option<ir::Program>| {
             let Some(p) = p else {
                 if why {
-                    eprintln!("WAVE64-FORM {label}: ir returned None");
+                    diag("WAVE64-FORM", format_args!("{label}: ir returned None"));
                 }
                 return None;
             };
@@ -492,7 +570,7 @@ pub fn emit(
                 Ok(st) => st,
                 Err(e) => {
                     if why {
-                        eprintln!("WAVE64-FORM {label}: structure failed: {e}");
+                        diag("WAVE64-FORM", format_args!("{label}: structure failed: {e}"));
                     }
                     return None;
                 }
@@ -501,7 +579,7 @@ pub fn emit(
                 Ok(io) => io,
                 Err(e) => {
                     if why {
-                        eprintln!("WAVE64-FORM {label}: io::raise failed: {e}");
+                        diag("WAVE64-FORM", format_args!("{label}: io::raise failed: {e}"));
                     }
                     return None;
                 }
@@ -510,7 +588,7 @@ pub fn emit(
                 Ok(res) => res,
                 Err(e) => {
                     if why {
-                        eprintln!("WAVE64-FORM {label}: resource::track failed: {e}");
+                        diag("WAVE64-FORM", format_args!("{label}: resource::track failed: {e}"));
                     }
                     return None;
                 }
@@ -544,7 +622,8 @@ pub fn emit(
                 [0x58, 0x1d, 0xab, 0x2c, 0xd8, 0xbc, 0xf2, 0x2e, 0x5c, 0x96, 0x4b, 0x98, 0xe9, 0x03, 0x48, 0xd1]
                     | [0x24, 0x31, 0xbb, 0xe7, 0xdc, 0x15, 0x4a, 0xd7, 0x59, 0xd2, 0x0b, 0xc9, 0x54, 0x82, 0x9c, 0x1c]
             );
-        let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
+        let allowed = std::env::var("VICTORY_WAVE_WIDE_ALLOW").is_ok_and(|a| wide_allowed(&a, &c.digest));
+        let wide_on = wide_option.as_ref().map_or(scene_kernel || allowed, |v| v == "1");
         // A single guest wave can iterate an active-lane loop until both host
         // halves have finished. The precise latch and convergence conditions
         // for the driver compute route are checked by widen().
@@ -654,10 +733,7 @@ pub fn emit(
     };
     let supported = |(shader, wave): (HostShader, Option<u32>)| {
         if wave == Some(64) && lower::host_max_wave() == 32 {
-            Err(ShaderError::Unsupported {
-                offset: 0,
-                what: "no wave32 lowering for this wave64 program",
-            })
+            Err(no_wave32_lowering(native))
         } else {
             Ok(shader)
         }
@@ -703,7 +779,7 @@ fn widen(
         crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64 => {}
         crate::native::StageIo::Cs(cs) => {
             if why {
-                eprintln!("WAVE64-WIDE not tried: thread groups of {:?}", cs.threads);
+                diag("WAVE64-WIDE", format_args!("not tried: thread groups of {:?}", cs.threads));
             }
             return Err(NOT);
         }
@@ -739,7 +815,7 @@ fn widen(
                         format!("B{b}({nm}{})", if back { ",BACK" } else { "" })
                     })
                     .collect();
-                eprintln!("WAVE64-WIDE {} branches taken wave-wide: [{}]", wide.len(), desc.join(", "));
+                diag("WAVE64-WIDE", format_args!("{} branches taken wave-wide: [{}]", wide.len(), desc.join(", ")));
             }
             return r;
         }
@@ -750,7 +826,7 @@ fn widen(
             .collect();
         if more.is_empty() {
             if why {
-                eprintln!("WAVE64-WIDE stopped with {} branches wave-wide: a branch around it cannot be", wide.len());
+                diag("WAVE64-WIDE", format_args!("stopped with {} branches wave-wide: a branch around it cannot be", wide.len()));
             }
             return r;
         }

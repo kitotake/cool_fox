@@ -76,7 +76,7 @@ echo ===== %date% %time% =====>>"%~dp0debugs\shaders-precompile.log"
 echo Precompiling shaders from "%VICTORY_GAME_DIR%"...
 "%runner%" shaders "%VICTORY_GAME_DIR%" >>"%~dp0debugs\shaders-precompile.log" 2>&1
 set "run_error=%errorlevel%"
-echo Shader precompile exit code: %run_error%>>"%~dp0debugs\shaders-precompile.log"
+>>"%~dp0debugs\shaders-precompile.log" echo Shader precompile exit code: %run_error%
 echo Log saved to "%~dp0debugs\shaders-precompile.log"
 popd
 exit /b %run_error%

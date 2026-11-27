@@ -77,3 +77,6 @@
 *.swp
 Thumbs.db
 .DS_Store
+
+# Measured sessions written by scripts/bench.ps1
+/bench-results/

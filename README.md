@@ -26,6 +26,15 @@ report, run `Play-VIctory.cmd shaders`. It creates `debugs` when needed and
 appends the output to `debugs\shaders-precompile.log`. This can take several
 minutes; the compiled shaders are stored in the configured cache.
 
+To compare two runs on the same scene, run `scripts\bench.ps1`. It starts
+`Play-VIctory.cmd measure`, keeps only what that run appended to
+`debugs\victory-measure.log`, samples memory while the title runs and writes
+`log.txt`, `system.csv` and `summary.txt` under `bench-results\` (median/p95/p99
+ms per frame, preparing against GPU wait, dropped draws, pipelines being made,
+memory-pressure events). `-Set VICTORY_JOIN_PARTS=4` changes one setting for a
+run; `-Analyze debugs\victory-measure.log` sums up the last session of an
+existing log. It does not change the game's settings or the engine.
+
 To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer

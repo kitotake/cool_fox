@@ -4,11 +4,13 @@
 //! console waves).
 
 use super::{
-    NO_WAVE32, NO_WAVE32_SEVERAL_WAVES, diag_line, digest_hex, no_wave32_lowering, wide_allowed,
-    with_diag_label,
+    NO_WAVE32, NO_WAVE32_SEVERAL_WAVES, diag_line, diag_once_line, digest_hex, lower,
+    no_wave32_lowering, wide_allowed, with_diag_label,
 };
-use crate::ShaderError;
-use crate::native::{ComputeIo, HwStage, NativeProgram, StageIo};
+use crate::native::{
+    ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
+};
+use crate::{ShaderError, structure};
 
 /// A compute program of a thread group of `threads` x 1 x 1 (no code: only its group is read).
 fn group_of(threads: [u32; 3], wave64: bool) -> NativeProgram {
@@ -132,4 +134,147 @@ fn a_wave64_program_of_several_console_waves_is_listed_apart() {
     // (the first part of the text stays what a search on the old text finds)
     assert!(NO_WAVE32_SEVERAL_WAVES.starts_with(NO_WAVE32));
     assert_ne!(NO_WAVE32_SEVERAL_WAVES, NO_WAVE32);
+}
+
+#[test]
+fn a_line_is_printed_once_under_a_label_and_every_time_without() {
+    let once = |m: &str| diag_once_line("WAVE64-SITE", format_args!("{m}"));
+    with_diag_label("shader A", || {
+        assert_eq!(once("v_mbcnt x2"), Some("WAVE64-SITE [shader A] v_mbcnt x2".to_owned()));
+        assert_eq!(once("v_mbcnt x2"), None);
+        assert!(once("v_readlane x1").is_some());
+    });
+    // another shader names the same sites again
+    with_diag_label("shader B", || assert!(once("v_mbcnt x2").is_some()));
+    // with no label there is nothing to tell shaders apart by: always printed
+    assert!(once("v_mbcnt x2").is_some());
+    assert!(once("v_mbcnt x2").is_some());
+}
+
+const S_ENDPGM: u32 = 0xBF81_0000;
+const DS_WRITE_B32: u8 = 0x0D;
+const DS_READ_B32: u8 = 0x36;
+
+/// DS `op vdst, addr, data0` at offset 0.
+const fn ds(op: u8, vdst: u8, addr: u8, data0: u8) -> [u32; 2] {
+    [0x36 << 26 | (op as u32) << 18, (vdst as u32) << 24 | (data0 as u32) << 8 | addr as u32]
+}
+
+/// A wave64 compute program of `threads` threads with 512 bytes of LDS. The threads below s0
+/// raise an LDS flag and, in a second branch inside theirs, read it back and write another
+/// value (a read and a write in one lane-branch region). `readlane` puts a
+/// `v_readlane_b32 s7, v1, 0` in the block every lane runs (`Some(false)`) or in the branch
+/// (`Some(true)`).
+fn flag_region_program(threads: u32, readlane: Option<bool>, flag_only: bool) -> NativeProgram {
+    let mut body = vec![0x7E12_0280]; // v_mov_b32 v9, 0
+    if readlane == Some(false) {
+        body.extend_from_slice(&[0xD760_0007, 0x0001_0101]);
+    }
+    body.extend_from_slice(&ds(DS_WRITE_B32, 0, 9, 9));
+    let mut branch = vec![0x7E04_0281]; // v_mov_b32 v2, 1
+    if readlane == Some(true) {
+        branch.extend_from_slice(&[0xD760_0007, 0x0001_0101]);
+    }
+    branch.extend_from_slice(&ds(DS_WRITE_B32, 0, 9, 2));
+    let mut rest = ds(DS_READ_B32, 3, 9, 0).to_vec();
+    rest.push(0x7E0C_02FF); // v_mov_b32 v6, lit
+    rest.push(2);
+    // (a flag region writes only the flag's own constant, which v2 holds; else another value)
+    rest.extend_from_slice(&ds(DS_WRITE_B32, 0, 9, if flag_only { 2 } else { 6 }));
+    branch.extend_from_slice(&[0xBF07_8001, 0xBF85_0000 | rest.len() as u32]);
+    branch.extend_from_slice(&rest);
+    body.extend_from_slice(&[0x7D88_0000, 0xBE8C_246A, 0xBF88_0000 | branch.len() as u32]);
+    body.extend_from_slice(&branch);
+    body.push(0xBEFE_040C); // s_mov_b64 exec, s[12:13]
+    body.extend_from_slice(&ds(DS_READ_B32, 5, 9, 0));
+    body.extend_from_slice(&[
+        0x4A0A_0A81, // v_add_nc_u32 v5, 1, v5
+        0x3402_0082, // v_lshlrev_b32 v1, 2, v0
+        0x38 << 26 | 0x1C << 18 | 1 << 12,
+        0x80 << 24 | 2 << 16 | 5 << 8 | 1, // buffer_store_dword v5, v1, s[8:11], 0 offen
+    ]);
+    let mut words = vec![
+        0xBE85_0380, // s_mov_b32 s5, 0
+        0x3D << 26 | 0x02 << 18 | 8 << 6 | 2,
+        125 << 25, // s_load_dwordx4 s[8:11], s[4:5], 0
+    ];
+    words.extend_from_slice(&body);
+    words.push(S_ENDPGM);
+    NativeProgram {
+        stage: HwStage::Cs,
+        wave64: true,
+        vgprs: 16,
+        layout: vec![
+            RootParam {
+                root: RootType::Constants,
+                table_offset_dwords: 0,
+                sgprs: 4,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            },
+            RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 4,
+                slot: 1,
+            },
+        ],
+        used: vec![UsedResource {
+            kind: ResourceType::Uav,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 0,
+            dwords: 4,
+            user_data: 4,
+            slot: 1,
+        }],
+        io: StageIo::Cs(ComputeIo { rsrc2: 5 << 1 | 1 << 15, threads: [threads, 1, 1] }),
+        code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+    }
+}
+
+fn sites_of(native: &NativeProgram) -> Vec<String> {
+    let p = crate::spill::build(native).expect("build");
+    let st = structure::structure(&p).expect("structure");
+    lower::wave64_sites(&p, &st)
+}
+
+#[test]
+fn a_region_that_reads_and_writes_lds_is_named_with_its_branch_and_accesses() {
+    let sites = sites_of(&flag_region_program(128, None, false));
+    assert_eq!(
+        sites,
+        ["LDS region B1,B2 (flag region: no) around B0(s_cbranch_execz@0x20(B0)): \
+          reads ds_read_b32@0x38(B2); writes ds_write_b32@0x28(B1) ds_write_b32@0x48(B2)"]
+    );
+}
+
+#[test]
+fn a_region_that_only_raises_a_flag_is_named_as_one() {
+    let sites = sites_of(&flag_region_program(1024, None, true));
+    assert_eq!(sites.len(), 1, "{sites:?}");
+    assert!(sites[0].starts_with("LDS region B1,B2 (flag region: yes) around B0("), "{sites:?}");
+}
+
+#[test]
+fn a_lane_crossing_instruction_is_named_with_whether_every_lane_runs_it() {
+    let all = sites_of(&flag_region_program(128, Some(false), false));
+    assert!(all.contains(&"v_readlane x1: 0x10(B0,all)".to_owned()), "{all:?}");
+    let lane = sites_of(&flag_region_program(128, Some(true), false));
+    assert!(lane.iter().any(|l| l.starts_with("v_readlane x1: 0x") && l.ends_with(",lane)")), "{lane:?}");
+    // none where the program has none
+    let none = sites_of(&flag_region_program(128, None, false));
+    assert!(none.iter().all(|l| !l.starts_with("v_")), "{none:?}");
+}
+
+#[test]
+fn the_sites_of_a_program_do_not_depend_on_its_thread_group() {
+    // (the group decides whether a region is refused, not where it is)
+    let a = sites_of(&flag_region_program(64, Some(false), false));
+    let b = sites_of(&flag_region_program(1024, Some(false), false));
+    assert_eq!(a, b);
 }

@@ -384,6 +384,9 @@ pub struct UserData {
 thread_local! {
     /// See [`with_diag_label`].
     static DIAG_LABEL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// The lines [`diag_once`] has printed under the current label.
+    static DIAG_SEEN: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 /// Runs `f` with `label` (a shader's name and hash, as a `victory translate --list` line
@@ -399,6 +402,7 @@ pub fn with_diag_label<R>(label: &str, f: impl FnOnce() -> R) -> R {
         }
     }
     let before = DIAG_LABEL.with(|l| std::mem::replace(&mut *l.borrow_mut(), label.to_owned()));
+    DIAG_SEEN.with(|s| s.borrow_mut().clear());
     let _restore = Restore(before);
     f()
 }
@@ -414,6 +418,21 @@ pub(super) fn diag_line(tag: &str, msg: std::fmt::Arguments<'_>) -> String {
 
 pub(super) fn diag(tag: &str, msg: std::fmt::Arguments<'_>) {
     eprintln!("{}", diag_line(tag, msg));
+}
+
+/// [`diag`], but a line already printed under the same label is not printed again (a program
+/// is lowered in several forms, which name the same sites). With no label, always printed.
+pub(super) fn diag_once(tag: &str, msg: std::fmt::Arguments<'_>) {
+    if let Some(line) = diag_once_line(tag, msg) {
+        eprintln!("{line}");
+    }
+}
+
+/// The line [`diag_once`] prints, or None when it has printed it already.
+pub(super) fn diag_once_line(tag: &str, msg: std::fmt::Arguments<'_>) -> Option<String> {
+    let line = diag_line(tag, msg);
+    let labelled = DIAG_LABEL.with(|l| !l.borrow().is_empty());
+    (!labelled || DIAG_SEEN.with(|s| s.borrow_mut().insert(line.clone()))).then_some(line)
 }
 
 /// `digest` as the lowercase hex a `WAVE64-ID` line and `VICTORY_WAVE_WIDE_ALLOW` name it by.

@@ -937,6 +937,130 @@ fn meeting_mode() -> u32 {
 /// group barrier) at its start and before its exit. `None` if barriers cannot keep the
 /// console's order.
 ///
+/// For `VICTORY_WAVE_WHY`: where a console wave64 program is held at 64 lanes on a host of 32,
+/// one line per site, from the program alone (nothing is lowered).
+///
+/// - Each lane-branch region that reads and writes LDS, the case [`lds_meetings`] refuses
+///   unless [`lds_flag_region`] takes it: its blocks, the branches around it and its LDS
+///   accesses, with whether it is a flag region.
+/// - The instructions that cross the halves of the wave (`v_mbcnt`, `v_readlane`,
+///   `v_writelane`, `ds_(b)permute`, a mask read as a number): where they are, and whether
+///   every lane runs the block (`all`) or only some (`lane`).
+pub(super) fn wave64_sites(p: &Program, st: &Structured) -> Vec<String> {
+    const MAX: usize = 12;
+    let mut out = Vec::new();
+    let Some(all) = all_lane_blocks(st) else {
+        out.push("an indirect exit: the lane regions cannot be named".to_owned());
+        return out;
+    };
+    let n = all.len();
+    let site = |b: usize, i: &Inst| format!("{}@{:#x}(B{b})", i.name(), i.machine.offset);
+    // regions: the blocks not every lane runs, joined by the edges between them
+    let succ = |b: usize| -> Vec<usize> {
+        match st.exits[b] {
+            LaneExit::Jump(t) => vec![t],
+            LaneExit::Branch { taken, not_taken, .. } => vec![taken, not_taken],
+            LaneExit::End | LaneExit::Indirect => Vec::new(),
+        }
+    };
+    let mut root: Vec<usize> = (0..n).collect();
+    fn find(root: &mut [usize], mut b: usize) -> usize {
+        while root[b] != b {
+            root[b] = root[root[b]];
+            b = root[b];
+        }
+        b
+    }
+    for b in 0..n {
+        for t in succ(b) {
+            if !all[b] && !all[t] {
+                let (x, y) = (find(&mut root, b), find(&mut root, t));
+                root[x] = y;
+            }
+        }
+    }
+    let lane_regions = lane_regions(st).unwrap_or_default();
+    let mut seen: Vec<usize> = Vec::new();
+    for b in (0..n).filter(|&b| !all[b]) {
+        let r = find(&mut root, b);
+        if seen.contains(&r) {
+            continue;
+        }
+        seen.push(r);
+        let blocks: Vec<usize> = (0..n).filter(|&c| !all[c] && find(&mut root, c) == r).collect();
+        let (mut reads, mut writes) = (Vec::new(), Vec::new());
+        for &c in &blocks {
+            for i in &p.blocks[c].insts {
+                let name = i.name();
+                if !matches!(i.fields, Fields::Ds { .. }) || name.starts_with("ds_swizzle") || name.contains("permute") {
+                    continue;
+                }
+                if name.starts_with("ds_read") { reads.push(site(c, i)) } else { writes.push(site(c, i)) }
+            }
+        }
+        if reads.is_empty() || writes.is_empty() {
+            continue;
+        }
+        let around: Vec<String> = lane_regions
+            .iter()
+            .filter(|(_, region)| blocks.iter().any(|&c| region[c]))
+            .map(|&(br, _)| {
+                let last = p.blocks[br].insts.last().map_or("?".to_owned(), |i| site(br, i));
+                format!("B{br}({last})")
+            })
+            .collect();
+        let list = |v: &[String]| {
+            let more = v.len().saturating_sub(MAX);
+            let mut text = v.iter().take(MAX).cloned().collect::<Vec<_>>().join(" ");
+            if more > 0 {
+                text += &format!(" +{more} more");
+            }
+            text
+        };
+        out.push(format!(
+            "LDS region {} (flag region: {}) around {}: reads {}; writes {}",
+            blocks.iter().map(|c| format!("B{c}")).collect::<Vec<_>>().join(","),
+            if lds_flag_region(p, st, &blocks) { "yes" } else { "no" },
+            if around.is_empty() { "?".to_owned() } else { around.join(",") },
+            list(&reads),
+            list(&writes),
+        ));
+    }
+    let mut crossing: Vec<(&str, Vec<String>)> = Vec::new();
+    for (b, block) in p.blocks.iter().enumerate().take(n) {
+        for i in &block.insts {
+            let name = i.name();
+            let kind = if name.starts_with("v_mbcnt") {
+                "v_mbcnt"
+            } else if name == "v_readlane_b32" {
+                "v_readlane"
+            } else if name == "v_writelane_b32" {
+                "v_writelane"
+            } else if name.starts_with("ds_permute") || name.starts_with("ds_bpermute") {
+                "ds_(b)permute"
+            } else if reads_mask_as_data(st, i) {
+                "mask as data"
+            } else {
+                continue;
+            };
+            let at = format!("{:#x}(B{b},{})", i.machine.offset, if all[b] { "all" } else { "lane" });
+            match crossing.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, v)) => v.push(at),
+                None => crossing.push((kind, vec![at])),
+            }
+        }
+    }
+    for (kind, at) in crossing {
+        let more = at.len().saturating_sub(MAX);
+        let mut text = at.iter().take(MAX).cloned().collect::<Vec<_>>().join(" ");
+        if more > 0 {
+            text += &format!(" +{more} more");
+        }
+        out.push(format!("{kind} x{}: {text}", at.len()));
+    }
+    out
+}
+
 /// The console runs the wave's lanes in step, so an LDS write is seen by every later read. Two
 /// host waves keep that order if they meet between any two accesses of which one writes. A
 /// barrier must be run by every thread, so it cannot stand in a lane branch's region; but
@@ -1791,6 +1915,9 @@ impl<'a> Lower<'a> {
                     }
                     why.sort_unstable();
                     super::diag("WAVE64-WHY", format_args!("group={group} lds={} [{}]", s.lds_dwords > 0, why.join(", ")));
+                    for site in wave64_sites(p, x.st) {
+                        super::diag_once("WAVE64-SITE", format_args!("{site}"));
+                    }
                 }
             }
             if wave == 32 && x.native.wave64 {
